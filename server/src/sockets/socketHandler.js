@@ -2,9 +2,8 @@ const Ajv = require('ajv');
 const addFormats = require('ajv-formats');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const db = require('../config/db');
 const messageSchema = require('../schemas/message.schema.json');
-
+const supabase= require('../config/supabase');
 const ajv = new Ajv();
 addFormats(ajv);
 const validate = ajv.compile(messageSchema);
@@ -41,11 +40,14 @@ const socketHandler = (io) => {
         socket.on('register', async ({ username, password }) => {
             try {
                 const hashedPassword = await bcrypt.hash(password, 10);
-                const result = await db.query(
-                    'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
-                    [username, hashedPassword]
-                );
-                socket.emit('register_success', { userId: result.rows[0].id });
+                const {data,error} = await supabase.from('users').insert([{
+                    username,
+                    password_hash: hashedPassword
+                }]).select().single();
+                if (error) {
+                    throw error;
+                }
+                socket.emit('register_success', { userId: data.id });
             } catch (err) {
                 console.error("Register Error:", err.message);
                 socket.emit('error', { message: 'Registration failed (Username might be taken)' });
@@ -55,12 +57,12 @@ const socketHandler = (io) => {
         // LOGIN
         socket.on('login', async ({ username, password }) => {
             try {
-                const result = await db.query('SELECT * FROM users WHERE username = $1', [username]);
-                if (result.rows.length === 0) {
+                const {data,error} = await supabase.from('users').select('*').eq('username', username);
+                if (data.length === 0|| error) {
                     return socket.emit('error', { message: 'User not found' });
                 }
 
-                const user = result.rows[0];
+                const user = data[0];
                 const match = await bcrypt.compare(password, user.password_hash);
 
                 if (!match) {

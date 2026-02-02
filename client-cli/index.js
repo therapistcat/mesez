@@ -31,15 +31,13 @@ async function authFlow() {
     const { action } = await inquirer.prompt([{
         type: 'list',
         name: 'action',
-        message: 'Welcome! Please select an option:',
+        message: 'Welcome! Please select an option:\n1. Login\n2. Register\n3. Exit\nEnter choice number:',
         choices: [
-            '1. Login',
-            '2. Register',
-            '3. Exit'
+            '1','2','3'
         ]
     }]);
-
-    if (action.includes('Exit')) {
+    
+    if (action.includes('3')) {
         console.log(chalk.blue('Goodbye!'));
         process.exit(0);
     }
@@ -51,7 +49,7 @@ async function authFlow() {
 
     const { username, password } = credentials;
 
-    if (action.includes('Register')) {
+    if (action.includes('2')) {
         console.log(chalk.gray('Registering...'));
         socketProvider.socket.emit('register', { username, password });
 
@@ -64,7 +62,7 @@ async function authFlow() {
             await authFlow();
         }
 
-    } else if (action.includes('Login')) {
+    } else if (action.includes('1')) {
         console.log(chalk.gray('Logging in...'));
         socketProvider.socket.emit('login', { username, password });
 
@@ -114,22 +112,22 @@ async function mainMenu() {
     const { action } = await inquirer.prompt([{
         type: 'list',
         name: 'action',
-        message: `Main Menu (${currentUser}):`,
+        message: `Main Menu (${currentUser}):\nSelect an action:\n1. Start Direct Chat\n2. Logout\n3. Exit\nEnter choice number:`,
         choices: [
-            '1. Start Direct Chat',
-            '2. Logout',
-            '3. Exit'
+            '1',
+            '2',
+            '3'
         ]
     }]);
 
-    if (action.includes('Start Direct Chat')) {
+    if (action.includes('1')) {
         await chatSetupFlow();
-    } else if (action.includes('Logout')) {
+    } else if (action.includes('2')) {
         currentUser = null;
         currentRecipient = null;
         console.log(chalk.yellow('Logged out.'));
         await authFlow();
-    } else if (action.includes('Exit')) {
+    } else if (action.includes('3')) {
         console.log(chalk.blue('Goodbye!'));
         process.exit(0);
     }
