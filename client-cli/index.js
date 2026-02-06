@@ -2,8 +2,9 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { v4 as uuidv4 } from 'uuid';
 import socketProvider from './src/core/transport/SocketProvider.js';
-
-const SERVER_URL = 'http://localhost:3000';
+import dotenv from 'dotenv';
+dotenv.config();
+const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000';
 let currentUser = null;
 let currentToken = null;
 // No room concept anymore, just direct chat context if needed or purely command based
@@ -14,7 +15,7 @@ async function main() {
 
     try {
         socketProvider.connect(SERVER_URL);
-        console.log(chalk.gray('Connected to socket server...'));
+        console.log(chalk.gray(`Connected to socket server at ${SERVER_URL}...`));
 
         socketProvider.socket.on('error', (err) => {
             // suppress global error spam, let handlers deal with it
@@ -135,7 +136,7 @@ async function mainMenu() {
         socketProvider.setAuth(null);
         console.log(chalk.yellow('Logged out.'));
         await authFlow();
-    } else if (action.includes('3')) {
+    } else if (action.includes('4')) {
         console.log(chalk.blue('Goodbye!'));
         process.exit(0);
     }
