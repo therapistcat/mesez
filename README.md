@@ -1,100 +1,133 @@
-# OffTheGrid
+# OffTheGrid (mesez)
 
-**A project to go beyond network limitations and counter internet blackouts in protests and natural calamities.**
+Resilient messaging app focused on low-friction communication with Socket.io, authentication, and per-user key management.
 
-## Overview
+## Current Architecture
 
-OffTheGrid is a resilient messaging application designed to function in challenged network environments. This implementation currently focuses on a **Socket.io-based Client-Server architecture** that enables real-time communication between CLI clients.
+- `server/`: Express + Socket.io + Supabase-backed API/events.
+- `client-cli/`: TypeScript CLI chat client (`inquirer`, `chalk`, `socket.io-client`).
+- `client-web/`: React + Vite web chat client.
 
-## Features implemented
+## Implemented Features
 
--   **Real-time Messaging**: Instant communication between connected clients using Socket.io.
--   **CLI Interface**: A command-line interface built with `inquirer` and `chalk` for a user-friendly terminal experience.
--   **User Identification**: Users are prompted to enter a username upon connection. Messages are broadcasted with the sender's identity (e.g., `[Alice]: Hello`).
--   **Structured Messaging**: Messages are sent as structured objects `{ sender, text }` for better handling and display.
--   **Automated Diagnostics**: The client sends hardcoded diagnostic messages on startup to verify connectivity.
--   **ESM Support**: The client-cli is built using ECMAScript Modules (`import`/`export`) to support modern dependencies.
+- User registration and login over Socket.io (`register`, `login`) with JWT session handling.
+- Direct (user-to-user) messaging with schema validation (AJV).
+- Message persistence to Supabase (`messages` table).
+- Chat history retrieval (`get_chat_history`).
+- Online/offline presence updates (`user_status`, `get_online_users`, `get_all_users_status`).
+- Public key upload and lookup for users (`upload_public_keys`, `check_public_keys`, `get_user_public_keys`).
+- Local keypair generation in clients:
+  - CLI: filesystem `.keys/<username>.json`
+  - Web: browser storage (via `keyManagerBrowser`)
+
+## Fragmentation Architecture
+
+Fragmentation is implemented to support constrained transports (including future mesh/BLE paths) where smaller packets are more reliable than sending a full JSON payload in one frame.
+
+- Client side:
+  - Direct message object is `JSON.stringify`-ed.
+  - Payload is split into UTF-8-safe fragments of 20-31 bytes.
+  - Each fragment includes `msg_id`, `frag_id`, `total_frags`, `checksum`, `payload`, and `to`.
+  - Fragments are emitted over Socket.io via `socket.emit('fragment', fragment)`.
+- Server side:
+  - Fragments are buffered by `msg_id`.
+  - Reassembly starts only when all fragments are present.
+  - SHA-256 checksum is verified before parsing.
+  - Reassembled JSON is parsed and validated with existing AJV schema.
+  - JWT sender identity is verified against message sender (`from`).
+  - Valid messages are persisted to Supabase, then routed to recipient via `direct_message`.
+- Security protections:
+  - Rejects invalid fragments (`total_frags > 500`, payload > 31 bytes, invalid checksum format).
+  - Per-socket fragment rate limiting.
+  - Duplicate `frag_id` packets are ignored.
+  - Incomplete fragment buffers are auto-cleaned after 30 seconds to prevent memory leaks.
+
+```text
+Client -> fragment -> Server buffer -> reassemble -> validate -> DB -> broadcast
+```
 
 ## Project Structure
 
-```
-OffTheGrid/
-├── client-cli/                 # CLI Client Application
-│   ├── src/
-│   │   ├── core/
-│   │   │   └── transport/
-│   │   │       ├── SocketProvider.js    # Wraps socket.io-client logic
-│   │   │       ├── BluetoothProvider.js # Placeholder for future Bluetooth support
-│   │   │       └── TransportInterface.js
-│   │   └── ui/
-│   │       └── prompts/
-│   │           └── chatPrompt.js
-│   ├── index.js                # Client Entry Point (CLI Loop)
-│   └── package.json            # Client dependencies (chalk, inquirer, etc.)
-│
-├── server/                     # Central Signaling/Relay Server
-│   ├── src/
-│   │   ├── config/
-│   │   │   └── db.js
-│   │   ├── sockets/
-│   │   │   └── socketHandler.js # Server-side socket logic & broadcasting
-│   │   └── index.js            # Server Entry Point (Express + Socket.io)
-│   └── package.json            # Server dependencies (express, socket.io, etc.)
-│
-└── README.md                   # Project Documentation
+```text
+mesez/
+  server/
+    src/
+      index.ts
+      sockets/socketHandler.ts
+      config/supabase.ts
+      schemas/message.schema.json
+  client-cli/
+    index.ts
+    src/
+      core/transport/SocketProvider.ts
+      crypto/keyManager.ts
+  client-web/
+    src/
+      context/SocketContext.tsx
+      components/Login.tsx
+      components/Chat.tsx
+  README.md
 ```
 
-## Getting Started
+## Prerequisites
 
-### Prerequisites
+- Node.js 18+ (recommended)
+- npm
+- Supabase project with expected tables (`users`, `publickeys`, `messages`)
 
--   **Node.js**: Ensure Node.js (v18+ recommended) is installed.
--   **npm**: Comes with Node.js.
+## Environment Variables
 
-### Installation
+### Server (`server/.env`)
 
-1.  **Install Server Dependencies**:
-    ```bash
-    cd server
-    npm install
-    ```
+```env
+PORT=3000
+JWT_SECRET=supersecretkey
+SUPABASE_URL=https://imnwsdbyhhxnikzfyvhc.supabase.co
+SUPABASE_ANON_KEY=sb_publishable_-3PaDcpKEuhQEv4SlqPfqQ_m61PZ3MD
+```
 
-2.  **Install Client Dependencies**:
-    ```bash
-    cd ../client-cli
-    npm install
-    ```
+### CLI Client (`client-cli/.env`, optional)
 
-### Running the Application
+```env
+SERVER_URL=http://localhost:3000
+```
 
-You will need at least **two terminals** (one for the server, one or more for clients).
+Note: web client server URL is currently hardcoded to `http://localhost:3000` in `client-web/src/context/SocketContext.tsx`.
 
-#### 1. Start the Server
-In the first terminal:
+## Setup
+
+```bash
+cd server && npm install
+cd ../client-cli && npm install
+cd ../client-web && npm install
+```
+
+## Run
+
+Use separate terminals.
+
+1. Start server:
+
 ```bash
 cd server
 npm start
 ```
-*The server will start listening on port 3000.*
 
-#### 2. Start a Client
-In a new terminal:
+2. Start CLI client:
+
 ```bash
 cd client-cli
-node index.js
+npm start
 ```
-*   You will be prompted to enter your **username**.
-*   Once connected, you can type messages and hit Enter to send.
-*   Incoming messages from other clients will appear automatically.
 
-#### 3. Start Additional Clients
-Open more terminals and repeat step 2 to simulate multiple users (e.g., Alice, Bob) chatting with each other.
+3. Start web client:
 
-## Technical Details
+```bash
+cd client-web
+npm run dev
+```
 
--   **Communication Protocol**: Socket.io (WebSocket with fallback).
--   **Server**: Node.js with Express.
--   **Client**: Node.js CLI using `inquirer` for input loops and `chalk` for styling.
--   **Module System**:
-    -   Server: CommonJS (`require`).
-    -   Client: ESM (`import`), configured via `"type": "module"` in `package.json`.
+## Notes
+
+- Bluetooth transport files exist as placeholders; runtime transport is Socket.io/internet.
+- Web client requests `get_inbox`, but the current server socket handler does not implement that event yet.

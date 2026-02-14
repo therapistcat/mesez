@@ -2,8 +2,9 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import type { ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
-import { generateAndStoreKeys, loadStoredKeys, type PublicKeys } from '../../crypto/keyManagerBrowser';
+import { generateAndStoreKeys, loadStoredKeys } from '../../crypto/keyManagerBrowser';
 import { encryptMessage, decryptMessage } from '../../crypto/messageEncryption';
+import { fragmentMessage } from '../utils/FragmentChopper';
 
 interface User {
     id: string;
@@ -61,11 +62,13 @@ const SERVER_URL = 'http://localhost:3000';
 function mapServerMessage(msg: any): Message {
     return {
         id: msg.id,
-        from: msg.sender_username || msg.from,
-        to: msg.recipient_username || msg.to,
+        from: msg.sender_username || msg.sender || msg.from,
+        to: msg.recipient_username || msg.recipient || msg.to,
         content: msg.content,
         timestamp: msg.timestamp,
         status: msg.status,
+        encrypted: msg.encrypted,
+        iv: msg.iv,
     };
 }
 
@@ -112,7 +115,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             console.error('Socket error:', err);
         });
 
-        newSocket.on('message', async (msg: any) => {
+        const onDirectMessage = async (msg: any) => {
             const mapped = mapServerMessage(msg);
             
             // Decrypt message if encrypted
@@ -149,7 +152,11 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             }
             
             setMessages((prev) => [...prev, mapped]);
-        });
+        };
+
+        newSocket.on('direct_message', onDirectMessage);
+        // Backward compatibility with legacy server event.
+        newSocket.on('message', onDirectMessage);
 
         newSocket.on('chat_history', async (data: { contact: string; messages: any[] }) => {
             // Map server field names to client field names
@@ -229,6 +236,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             newSocket.off('disconnect');
             newSocket.off('connect_error');
             newSocket.off('error');
+            newSocket.off('direct_message');
             newSocket.off('message');
             newSocket.off('chat_history');
             newSocket.off('inbox_data');
@@ -417,12 +425,22 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             timestamp: new Date().toISOString(),
             status: 'sent',
             encrypted,
-            iv,
         };
+        if (iv) {
+            msg.iv = iv;
+        }
 
         // Optimistic update with original content for display
         setMessages((prev) => [...prev, { ...msg, content }]);
-        socket.emit('message', msg);
+        try {
+            const fragments = await fragmentMessage(msg as Record<string, unknown> & { to: string });
+            fragments.forEach((fragment) => {
+                socket.emit('fragment', fragment);
+            });
+        } catch (fragmentError) {
+            console.error('Fragmentation failed, using legacy message event:', fragmentError);
+            socket.emit('message', msg);
+        }
     }, [socket, user]);
 
     return (

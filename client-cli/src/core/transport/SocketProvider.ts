@@ -1,4 +1,5 @@
 import { io, Socket } from "socket.io-client";
+import { fragmentMessage } from "./FragmentChopper.ts";
 
 class SocketProvider {
     socket: Socket | null;
@@ -34,15 +35,31 @@ class SocketProvider {
 
     send(message: any) {
         if (this.socket) {
-            this.socket.emit("message", message);
+            try {
+                const fragments = fragmentMessage(message);
+                fragments.forEach((fragment) => {
+                    this.socket!.emit("fragment", fragment);
+                });
+            } catch (err: any) {
+                console.error("Fragmentation failed, using legacy message event:", err?.message || err);
+                // Fallback keeps compatibility if fragmentation fails unexpectedly.
+                this.socket.emit("message", message);
+            }
         }
     }
 
     onMessage(callback: (data: any) => void) {
         if (this.socket) {
-            this.socket.on("message", (data: any) => {
+            // Clear existing listeners to avoid duplicate handlers across chat sessions.
+            this.socket.off("direct_message");
+            this.socket.off("message");
+
+            const handler = (data: any) => {
                 callback(data);
-            });
+            };
+
+            this.socket.on("direct_message", handler);
+            this.socket.on("message", handler);
         }
     }
 
