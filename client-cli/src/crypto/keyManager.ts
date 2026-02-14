@@ -23,6 +23,10 @@ type StoredKeys = {
 
 const KEY_DIR = '.keys';
 
+function normalizeUsername(value: string): string {
+	return (value || '').trim().toLowerCase();
+}
+
 const exportKeyPair = (pair: { publicKey: any; privateKey: any }): KeyPair => {
 	const publicKey = pair.publicKey
 		.export({ type: 'spki', format: 'der' })
@@ -35,7 +39,7 @@ const exportKeyPair = (pair: { publicKey: any; privateKey: any }): KeyPair => {
 };
 
 export async function generateAndStoreKeys(username: string): Promise<{ filePath: string; publicKeys: PublicKeys }> {
-	const normalizedUsername = username.trim();
+	const normalizedUsername = normalizeUsername(username);
 	if (!normalizedUsername) {
 		throw new Error('Username is required for key generation');
 	}
@@ -71,7 +75,7 @@ export async function generateAndStoreKeys(username: string): Promise<{ filePath
 }
 
 export async function loadStoredKeys(username: string): Promise<StoredKeys | null> {
-	const normalizedUsername = username.trim();
+	const normalizedUsername = normalizeUsername(username);
 	if (!normalizedUsername) {
 		throw new Error('Username is required to load keys');
 	}

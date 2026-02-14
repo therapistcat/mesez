@@ -22,7 +22,7 @@ const KEY_STORE_NAME = 'userKeys';
 const MSG_STORE_NAME = 'messages';
 const DB_VERSION = 2;
 
-function normalizeUsername(value: string): string {
+export function normalizeUsername(value: string): string {
     return (value || '').trim().toLowerCase();
 }
 
@@ -65,6 +65,18 @@ function initDB(): Promise<IDBDatabase> {
             }
         };
     });
+}
+
+/**
+ * Converts a base64 string to an ArrayBuffer
+ */
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
 }
 
 /**
@@ -119,11 +131,31 @@ async function exportKeyToBase64(key: CryptoKey, type: 'public' | 'private'): Pr
 }
 
 /**
+ * Import a base64 key back to CryptoKey format
+ */
+async function importKeyFromBase64(base64: string, keyType: 'signing' | 'encryption', type: 'public' | 'private'): Promise<CryptoKey> {
+    const buffer = base64ToArrayBuffer(base64);
+    const format = type === 'public' ? 'spki' : 'pkcs8';
+    const algorithm = keyType === 'signing' ? 'Ed25519' : 'X25519';
+    const usages = keyType === 'signing' 
+        ? (type === 'public' ? ['verify'] : ['sign'])
+        : (type === 'public' ? ['deriveKey', 'deriveBits'] : ['deriveKey', 'deriveBits']);
+    
+    return await window.crypto.subtle.importKey(
+        format,
+        buffer,
+        { name: algorithm },
+        true, // extractable
+        usages as KeyUsage[]
+    );
+}
+
+/**
  * Generate key pair for user registration and store full pairs in IndexedDB
  * Returns only public keys to send to server
  */
 export async function generateAndStoreKeys(username: string): Promise<PublicKeys> {
-    const normalizedUsername = username.trim();
+    const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) {
         throw new Error('Username is required for key generation');
     }
@@ -175,7 +207,7 @@ export async function generateAndStoreKeys(username: string): Promise<PublicKeys
  * Load stored keys from IndexedDB
  */
 export async function loadStoredKeys(username: string): Promise<StoredKeys | null> {
-    const normalizedUsername = username.trim();
+    const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) {
         throw new Error('Username is required to load keys');
     }
@@ -192,6 +224,34 @@ export async function loadStoredKeys(username: string): Promise<StoredKeys | nul
         });
     } catch (err) {
         console.error('Error loading stored keys:', err);
+        return null;
+    }
+}
+
+/**
+ * Load stored keys and convert base64 strings to usable CryptoKey objects
+ */
+export async function loadUsableKeys(username: string): Promise<{
+    signing: { publicKey: CryptoKey; privateKey: CryptoKey };
+    encryption: { publicKey: CryptoKey; privateKey: CryptoKey };
+} | null> {
+    const storedKeys = await loadStoredKeys(username);
+    if (!storedKeys) {
+        return null;
+    }
+
+    try {
+        const signing = {
+            publicKey: await importKeyFromBase64(storedKeys.signing.publicKey, 'signing', 'public'),
+            privateKey: await importKeyFromBase64(storedKeys.signing.privateKey, 'signing', 'private'),
+        };
+        const encryption = {
+            publicKey: await importKeyFromBase64(storedKeys.encryption.publicKey, 'encryption', 'public'),
+            privateKey: await importKeyFromBase64(storedKeys.encryption.privateKey, 'encryption', 'private'),
+        };
+        return { signing, encryption };
+    } catch (err) {
+        console.error('Error converting stored keys to usable format:', err);
         return null;
     }
 }

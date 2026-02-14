@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import type { ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
-import { generateAndStoreKeys, loadStoredKeys, saveMessageLocally, loadLocalHistory, loadLocalInbox } from '../../crypto/keyManagerBrowser';
+import { generateAndStoreKeys, loadStoredKeys, saveMessageLocally, loadLocalHistory, loadLocalInbox, normalizeUsername } from '../../crypto/keyManagerBrowser';
 import { encryptMessage, decryptMessage } from '../../crypto/messageEncryption';
 import { fragmentMessage } from '../utils/FragmentChopper';
 
@@ -57,7 +57,7 @@ export const useSocket = () => {
     return context;
 };
 
-const SERVER_URL = 'http://localhost:3000';
+const SERVER_URL = (import.meta.env.VITE_SERVER_URL as string) || 'http://localhost:3000';
 
 // Map server message format to client format
 function mapServerMessage(msg: any): Message {
@@ -96,8 +96,90 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const loadChatHistory = useCallback(async (contact: string) => {
         if (!user) return;
         const history = await loadLocalHistory(user.username, contact);
-        setMessages(history);
-    }, [user]);
+        
+        // Decrypt any encrypted messages in the history
+        const decryptedHistory = await Promise.all(
+            history.map(async (msg) => {
+                // Only attempt decryption if message is marked as encrypted and has iv and content
+                if (msg.encrypted && msg.iv && msg.content && typeof msg.content === 'string') {
+                    // Skip if content is already an error message
+                    if (msg.content.startsWith('[Encrypted message')) {
+                        return msg;
+                    }
+                    
+                    // Check if content looks like base64 (encrypted data)
+                    if (!/^[A-Za-z0-9+/=]+$/.test(msg.content)) {
+                        return msg; // Not base64, probably already decrypted or invalid
+                    }
+                    
+                    try {
+                        const myKeys = await loadStoredKeys(user.username);
+                        if (myKeys) {
+                            let senderEncryptionPublicKey = msg.sender_encryption_public_key;
+                            
+                            // If no public key in message, try to request it
+                            if (!senderEncryptionPublicKey && socket) {
+                                // Use inline request instead of useCallback to avoid dependency issues
+                                const senderKeys = await new Promise<any>((resolve) => {
+                                    let settled = false;
+                                    let timer: ReturnType<typeof setTimeout>;
+
+                                    const cleanup = () => {
+                                        clearTimeout(timer);
+                                        socket.off('user_public_keys_response', onKeys);
+                                    };
+
+                                    const onKeys = (data: any) => {
+                                        const responseUsername = normalizeUsername(data?.username || '');
+                                        const senderUsername = normalizeUsername(msg.from || '');
+                                        if (!responseUsername || !senderUsername || responseUsername !== senderUsername) {
+                                            return;
+                                        }
+                                        settled = true;
+                                        cleanup();
+                                        resolve(data);
+                                    };
+
+                                    timer = setTimeout(() => {
+                                        if (settled) return;
+                                        cleanup();
+                                        resolve(null);
+                                    }, 3000);
+
+                                    socket.on('user_public_keys_response', onKeys);
+                                    socket.emit('get_user_public_keys', { username: msg.from });
+                                });
+                                senderEncryptionPublicKey = senderKeys?.publicKeys?.encryptionPublicKey;
+                            }
+                            
+                            if (senderEncryptionPublicKey) {
+                                const decrypted = await decryptMessage(
+                                    msg.content,
+                                    msg.iv,
+                                    senderEncryptionPublicKey,
+                                    myKeys.encryption.privateKey
+                                );
+                                console.log('[Chat History] Successfully decrypted old message');
+                                // Return decrypted message without encryption metadata
+                                return { 
+                                    ...msg, 
+                                    content: decrypted,
+                                    encrypted: false,
+                                    iv: undefined,
+                                    sender_encryption_public_key: undefined
+                                };
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[Chat History Decryption] Failed to decrypt message:', err);
+                    }
+                }
+                return msg;
+            })
+        );
+        
+        setMessages(decryptedHistory);
+    }, [user, socket]);
 
     const requestUserPublicKeys = useCallback((username: string, timeoutMs = 5000) => {
         return new Promise<any>((resolve) => {
@@ -106,7 +188,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 return;
             }
 
-            const requestedUsername = username.trim();
+            const requestedUsername = normalizeUsername(username);
             if (!requestedUsername) {
                 resolve(null);
                 return;
@@ -121,8 +203,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             };
 
             const onKeys = (data: any) => {
-                const responseUsername = typeof data?.username === 'string' ? data.username.trim() : '';
-                if (!responseUsername || responseUsername.toLowerCase() !== requestedUsername.toLowerCase()) {
+                const responseUsername = normalizeUsername(data?.username || '');
+                if (!responseUsername || responseUsername !== requestedUsername) {
                     return;
                 }
 
@@ -145,7 +227,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const syncOwnKeysWithServer = useCallback(async (username: string): Promise<void> => {
         if (!socket) return;
 
-        const normalizedUsername = username.trim();
+        const normalizedUsername = normalizeUsername(username);
         if (!normalizedUsername) return;
 
         let localKeys = await loadStoredKeys(normalizedUsername);
@@ -311,6 +393,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                             );
                             console.log('[Decryption] Success!');
                             mapped.content = decrypted;
+                            // Mark as decrypted (clear encrypted flag since content is now plaintext)
+                            mapped.encrypted = false;
                         } else {
                             console.error('[Decryption] Failed to retrieve public keys for sender:', mapped.from);
                             mapped.content = '[Encrypted message - sender key unavailable]';
@@ -349,8 +433,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }, [socket, user, requestUserPublicKeys, loadInbox]);
 
     const login = useCallback((username: string, password: string) => {
-        return new Promise<void>(async (resolve, reject) => {
-            if (!socket) return reject('No socket connection');
+        return new Promise<void>((resolve, reject) => {
+            if (!socket) return reject(new Error('No socket connection'));
 
             socket.emit('login', { username, password });
 
@@ -371,7 +455,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 }
             };
 
-            const onError = (err: any) => {
+            const onError = (err: Error) => {
                 reject(err.message || 'Login failed');
                 cleanup();
             };
@@ -387,8 +471,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }, [socket, syncOwnKeysWithServer]);
 
     const register = useCallback((username: string, password: string) => {
-        return new Promise<void>(async (resolve, reject) => {
-            if (!socket) return reject('No socket connection');
+        return new Promise<void>((resolve, reject) => {
+            if (!socket) return reject(new Error('No socket connection'));
             const id = uuidv4();
             socket.emit('register', { id, username, password });
 
@@ -415,7 +499,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 }
             };
 
-            const onError = (err: any) => {
+            const onError = (err: Error) => {
                 reject(err.message || 'Registration failed');
                 cleanup();
             };
