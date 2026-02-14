@@ -2,7 +2,8 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import type { ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
-import { generateAndStoreKeys, type PublicKeys } from '../../crypto/keyManagerBrowser';
+import { generateAndStoreKeys, loadStoredKeys, type PublicKeys } from '../../crypto/keyManagerBrowser';
+import { encryptMessage, decryptMessage } from '../../crypto/messageEncryption';
 
 interface User {
     id: string;
@@ -16,6 +17,8 @@ export interface Message {
     content: string;
     timestamp: string;
     status?: string;
+    encrypted?: boolean;
+    iv?: string;
 }
 
 export interface InboxItem {
@@ -109,14 +112,87 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             console.error('Socket error:', err);
         });
 
-        newSocket.on('message', (msg: any) => {
+        newSocket.on('message', async (msg: any) => {
             const mapped = mapServerMessage(msg);
+            
+            // Decrypt message if encrypted
+            if (mapped.encrypted && mapped.iv && user) {
+                try {
+                    const myKeys = await loadStoredKeys(user.username);
+                    if (myKeys) {
+                        // Fetch sender's public key
+                        newSocket.emit('get_user_public_keys', { username: mapped.from });
+                        
+                        const senderKeys = await new Promise<any>((resolve) => {
+                            const onKeys = (data: any) => {
+                                newSocket.off('user_public_keys_response', onKeys);
+                                resolve(data);
+                            };
+                            newSocket.on('user_public_keys_response', onKeys);
+                            setTimeout(() => resolve(null), 3000);
+                        });
+
+                        if (senderKeys?.publicKeys) {
+                            const decrypted = await decryptMessage(
+                                mapped.content,
+                                mapped.iv,
+                                senderKeys.publicKeys.encryptionPublicKey,
+                                myKeys.encryption.privateKey
+                            );
+                            mapped.content = decrypted;
+                        }
+                    }
+                } catch (err) {
+                    console.error('Failed to decrypt message:', err);
+                    mapped.content = '[Encrypted message - decryption failed]';
+                }
+            }
+            
             setMessages((prev) => [...prev, mapped]);
         });
 
-        newSocket.on('chat_history', (data: { contact: string; messages: any[] }) => {
+        newSocket.on('chat_history', async (data: { contact: string; messages: any[] }) => {
             // Map server field names to client field names
             const mapped = data.messages.map(mapServerMessage);
+            
+            // Decrypt messages if needed
+            if (user) {
+                const myKeys = await loadStoredKeys(user.username);
+                const contactKeys = await new Promise<any>((resolve) => {
+                    newSocket.emit('get_user_public_keys', { username: data.contact });
+                    const onKeys = (keyData: any) => {
+                        newSocket.off('user_public_keys_response', onKeys);
+                        resolve(keyData);
+                    };
+                    newSocket.on('user_public_keys_response', onKeys);
+                    setTimeout(() => resolve(null), 3000);
+                });
+
+                if (myKeys && contactKeys?.publicKeys) {
+                    for (const msg of mapped) {
+                        if (msg.encrypted && msg.iv) {
+                            try {
+                                // Decrypt based on whether I sent or received
+                                const senderKey = msg.from === user.username 
+                                    ? contactKeys.publicKeys.encryptionPublicKey
+                                    : contactKeys.publicKeys.encryptionPublicKey;
+                                
+                                const decrypted = await decryptMessage(
+                                    msg.content,
+                                    msg.iv,
+                                    senderKey,
+                                    myKeys.encryption.privateKey
+                                );
+                                msg.content = decrypted;
+                            } catch (err) {
+                                console.error('Failed to decrypt chat history message:', err);
+                                msg.content = '[Encrypted message]';
+                            }
+                        }
+                    }
+                }
+            }
+            
             setMessages(mapped);
         });
 
@@ -295,19 +371,57 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         }
     }, [socket]);
 
-    const sendMessage = useCallback((to: string, content: string) => {
+    const sendMessage = useCallback(async (to: string, content: string) => {
         if (!socket || !user) return;
+        
+        let encryptedContent = content;
+        let iv: string | undefined;
+        let encrypted = false;
+
+        try {
+            // Load sender's private keys
+            const myKeys = await loadStoredKeys(user.username);
+            
+            // Fetch recipient's public keys
+            const recipientKeys = await new Promise<any>((resolve) => {
+                socket.emit('get_user_public_keys', { username: to });
+                
+                const onKeys = (data: any) => {
+                    socket.off('user_public_keys_response', onKeys);
+                    resolve(data);
+                };
+                
+                socket.on('user_public_keys_response', onKeys);
+                setTimeout(() => resolve(null), 3000);
+            });
+
+            if (myKeys && recipientKeys?.publicKeys) {
+                const encryptionResult = await encryptMessage(
+                    content,
+                    recipientKeys.publicKeys.encryptionPublicKey,
+                    myKeys.encryption.privateKey
+                );
+                encryptedContent = encryptionResult.encryptedContent;
+                iv = encryptionResult.iv;
+                encrypted = true;
+            }
+        } catch (err) {
+            console.error('Encryption failed, sending unencrypted:', err);
+        }
+
         const msg: Message = {
             id: uuidv4(),
             from: user.username,
             to,
-            content,
+            content: encrypted ? encryptedContent : content,
             timestamp: new Date().toISOString(),
             status: 'sent',
+            encrypted,
+            iv,
         };
 
-        // Optimistic update
-        setMessages((prev) => [...prev, msg]);
+        // Optimistic update with original content for display
+        setMessages((prev) => [...prev, { ...msg, content }]);
         socket.emit('message', msg);
     }, [socket, user]);
 

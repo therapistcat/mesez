@@ -172,6 +172,79 @@ const socketHandler = (io: any) => {
             }
         });
 
+        // GET USER PUBLIC KEYS (for encryption)
+        socket.on('get_user_public_keys', async (payload: { username: string }) => {
+            const requestedUsername = payload.username.trim().toLowerCase();
+
+            try {
+                // Check memory cache first
+                if (userPublicKeys.has(requestedUsername)) {
+                    const keys = userPublicKeys.get(requestedUsername);
+                    return socket.emit('user_public_keys_response', {
+                        username: payload.username,
+                        publicKeys: {
+                            signingPublicKey: keys.signingPublicKey,
+                            encryptionPublicKey: keys.encryptionPublicKey,
+                            format: keys.format
+                        }
+                    });
+                }
+
+                // Fetch from database
+                const { data: userData, error: userError } = await supabase
+                    .from('users')
+                    .select('id')
+                    .eq('username', payload.username)
+                    .single();
+
+                if (userError || !userData) {
+                    return socket.emit('user_public_keys_response', {
+                        username: payload.username,
+                        publicKeys: null,
+                        error: 'User not found'
+                    });
+                }
+
+                const { data: keysData, error: keysError } = await supabase
+                    .from('publickeys')
+                    .select('public_sign_key, public_encrypt_key, format')
+                    .eq('id', userData.id)
+                    .single();
+
+                if (keysError || !keysData) {
+                    return socket.emit('user_public_keys_response', {
+                        username: payload.username,
+                        publicKeys: null,
+                        error: 'Keys not found'
+                    });
+                }
+
+                const publicKeys = {
+                    signingPublicKey: keysData.public_sign_key,
+                    encryptionPublicKey: keysData.public_encrypt_key,
+                    format: keysData.format
+                };
+
+                // Cache for future requests
+                userPublicKeys.set(requestedUsername, {
+                    ...publicKeys,
+                    updatedAt: new Date().toISOString()
+                });
+
+                socket.emit('user_public_keys_response', {
+                    username: payload.username,
+                    publicKeys
+                });
+            } catch (err: any) {
+                console.error('Get Public Keys Error:', err.message || err);
+                socket.emit('user_public_keys_response', {
+                    username: payload.username,
+                    publicKeys: null,
+                    error: 'Failed to fetch keys'
+                });
+            }
+        });
+
         // MESSAGE (Direct Routing)
         socket.on('message', async (data: { id: string; from: string; to: string; content: string; status?: string; timestamp: string }) => {
             if (!socket.user) return socket.emit('error', { message: 'Unauthorized' });
