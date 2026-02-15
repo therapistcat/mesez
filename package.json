@@ -1,0 +1,14 @@
+{
+  "name": "mesez",
+  "private": true,
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix client-web run dev",
+    "dev": "concurrently -k -n server,web \"npm:dev:server\" \"npm:dev:web\"",
+    "tunnel:server": "ngrok http 3000",
+    "dev:with-ngrok": "concurrently -k -n server,web,ngrok \"npm:dev:server\" \"npm:dev:web\" \"npm:tunnel:server\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
