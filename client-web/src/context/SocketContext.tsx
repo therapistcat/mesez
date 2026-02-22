@@ -152,6 +152,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             }
             
             setMessages((prev) => [...prev, mapped]);
+            newSocket.emit('get_inbox');
         };
 
         newSocket.on('direct_message', onDirectMessage);
@@ -204,7 +205,12 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         });
 
         newSocket.on('inbox_data', (data: InboxItem[]) => {
-            setInbox(data);
+            const currentUser = user?.username?.trim().toLowerCase();
+            const normalized = (data || []).filter((item) => {
+                const contact = item.contact?.trim().toLowerCase();
+                return Boolean(contact) && contact !== currentUser;
+            });
+            setInbox(normalized);
         });
 
         newSocket.on('online_users_data', (data: string[]) => {
@@ -391,16 +397,27 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             const myKeys = await loadStoredKeys(user.username);
             
             // Fetch recipient's public keys
+            const normalizedTarget = to.trim().toLowerCase();
             const recipientKeys = await new Promise<any>((resolve) => {
                 socket.emit('get_user_public_keys', { username: to });
                 
                 const onKeys = (data: any) => {
+                    const responseUsername = typeof data?.username === 'string'
+                        ? data.username.trim().toLowerCase()
+                        : '';
+                    if (responseUsername !== normalizedTarget) {
+                        return;
+                    }
+                    clearTimeout(timeout);
                     socket.off('user_public_keys_response', onKeys);
                     resolve(data);
                 };
                 
                 socket.on('user_public_keys_response', onKeys);
-                setTimeout(() => resolve(null), 3000);
+                const timeout = setTimeout(() => {
+                    socket.off('user_public_keys_response', onKeys);
+                    resolve(null);
+                }, 3000);
             });
 
             if (myKeys && recipientKeys?.publicKeys) {
@@ -433,13 +450,15 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         // Optimistic update with original content for display
         setMessages((prev) => [...prev, { ...msg, content }]);
         try {
-            const fragments = await fragmentMessage(msg as Record<string, unknown> & { to: string });
+            const fragments = await fragmentMessage(msg as unknown as Record<string, unknown> & { to: string });
             fragments.forEach((fragment) => {
                 socket.emit('fragment', fragment);
             });
+            socket.emit('get_inbox');
         } catch (fragmentError) {
             console.error('Fragmentation failed, using legacy message event:', fragmentError);
             socket.emit('message', msg);
+            socket.emit('get_inbox');
         }
     }, [socket, user]);
 

@@ -641,6 +641,62 @@ const socketHandler = (io: any) => {
             }
         });
 
+        socket.on('get_inbox', async () => {
+            if (!socket.user) {
+                return;
+            }
+
+            const currentUser = normalizeUsername(socket.user.username);
+
+            try {
+                const { data, error } = await supabase
+                    .from('messages')
+                    .select('*')
+                    .or(`sender_username.eq.${currentUser},recipient_username.eq.${currentUser}`)
+                    .order('timestamp', { ascending: false });
+
+                if (error) {
+                    throw error;
+                }
+
+                const inboxByContact = new Map<string, {
+                    contact: string;
+                    last_message_preview: string;
+                    last_timestamp: string;
+                    unread_count: number;
+                }>();
+
+                for (const msg of data || []) {
+                    const sender = normalizeUsername(msg.sender_username || '');
+                    const recipient = normalizeUsername(msg.recipient_username || '');
+
+                    // Ignore malformed self/self rows and keep deterministic contact attribution.
+                    if (!sender || !recipient || sender === recipient) {
+                        continue;
+                    }
+
+                    const contact = sender === currentUser ? recipient : sender;
+                    if (!contact || contact === currentUser) {
+                        continue;
+                    }
+
+                    if (!inboxByContact.has(contact)) {
+                        inboxByContact.set(contact, {
+                            contact,
+                            last_message_preview: String(msg.content || '').slice(0, 120),
+                            last_timestamp: msg.timestamp,
+                            unread_count: 0
+                        });
+                    }
+                }
+
+                socket.emit('inbox_data', Array.from(inboxByContact.values()));
+            } catch (err: any) {
+                console.error('Inbox Error:', err.message || err);
+                socket.emit('error', { message: 'Failed to fetch inbox' });
+            }
+        });
+
         socket.on('get_all_users_status', async () => {
             if (!socket.user) {
                 return;
