@@ -8,10 +8,39 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+const configuredOrigins = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const allowlist = new Set(configuredOrigins);
+const allowOriginPatterns: RegExp[] = [
+    /^http:\/\/localhost(?::\d+)?$/i,
+    /^http:\/\/127\.0\.0\.1(?::\d+)?$/i,
+    /^https:\/\/[a-z0-9-]+-\d+\.inc\d+\.devtunnels\.ms$/i,
+    /^https:\/\/[a-z0-9-]+\.ngrok-free\.dev$/i,
+    /^https:\/\/[a-z0-9-]+\.ngrok-free\.app$/i,
+    /^https:\/\/[a-z0-9-]+\.loca\.lt$/i
+];
+
+const isOriginAllowed = (origin?: string): boolean => {
+    if (!origin) return true;
+    if (allowlist.has(origin)) return true;
+    return allowOriginPatterns.some((pattern) => pattern.test(origin));
+};
+
 const io = new Server(server, {
     cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
+        origin: (origin, callback) => {
+            if (isOriginAllowed(origin)) {
+                callback(null, true);
+                return;
+            }
+            callback(new Error(`Origin not allowed by CORS: ${origin || 'unknown'}`));
+        },
+        credentials: true,
+        methods: ['GET', 'POST'],
+        allowedHeaders: ['Content-Type', 'Authorization']
     }
 });
 

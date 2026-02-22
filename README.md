@@ -2,6 +2,17 @@
 
 Resilient messaging app focused on low-friction communication with Socket.io, authentication, and per-user key management.
 
+## Recent Updates (February 22, 2026)
+
+- Added robust encrypted-message persistence fallback for Supabase schemas that do not yet include `iv` / `is_encrypted` columns.
+- Added server-side decode support so stored encrypted envelope content is reconstructed before delivery (`content`, `iv`, `encrypted`, and sender key metadata).
+- Updated web message handling to avoid showing raw ciphertext in chat/inbox when decryption metadata is missing or key lookup fails.
+- Improved local history decryption behavior for sent/received message direction and peer key resolution.
+- Added Socket.IO credentialed CORS configuration for tunnel-based frontend origins.
+- Added client socket `withCredentials` and explicit `transports` setup for better dev tunnel connectivity.
+- Added `CORS_ORIGINS` support in server environment configuration.
+- Contributor: **sexychotabheem**
+
 ## Current Architecture
 
 - `server/`: Express + Socket.io + Supabase-backed API/events.
@@ -86,6 +97,7 @@ PORT=3000
 JWT_SECRET=supersecretkey
 SUPABASE_URL=https://imnwsdbyhhxnikzfyvhc.supabase.co
 SUPABASE_ANON_KEY=sb_publishable_-3PaDcpKEuhQEv4SlqPfqQ_m61PZ3MD
+CORS_ORIGINS=https://<your-frontend-tunnel-host>
 ```
 
 ### CLI Client (`client-cli/.env`, optional)

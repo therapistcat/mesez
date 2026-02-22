@@ -59,17 +59,26 @@ export const useSocket = () => {
 
 const SERVER_URL = (import.meta.env.VITE_SERVER_URL as string) || 'http://localhost:3000';
 
+function looksLikeCiphertext(value: unknown): value is string {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (trimmed.length < 24) return false;
+    if (trimmed.length % 4 !== 0) return false;
+    return /^[A-Za-z0-9+/]+={0,2}$/.test(trimmed);
+}
+
 // Map server message format to client format
 function mapServerMessage(msg: any): Message {
     const from = typeof msg?.from === 'string' ? msg.from : '';
     const to = typeof msg?.to === 'string' ? msg.to : '';
     const id = typeof msg?.id === 'string' ? msg.id : '';
+    const content = typeof msg?.content === 'string' ? msg.content : String(msg?.content ?? '');
 
     return {
         id,
         from,
         to,
-        content: msg.content,
+        content,
         timestamp: msg.timestamp,
         status: msg.status,
         encrypted: msg.encrypted,
@@ -100,10 +109,18 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const loadChatHistory = useCallback(async (contact: string) => {
         if (!user) return;
         const history = await loadLocalHistory(user.username, contact);
+        const currentUserKey = normalizeUsername(user.username);
         
         // Decrypt any encrypted messages in the history
         const decryptedHistory = await Promise.all(
             history.map(async (msg) => {
+                if (typeof msg.content === 'string' && looksLikeCiphertext(msg.content) && (!msg.encrypted || !msg.iv)) {
+                    return {
+                        ...msg,
+                        content: '[Encrypted message - metadata missing]'
+                    };
+                }
+
                 // Only attempt decryption if message is marked as encrypted and has iv and content
                 if (msg.encrypted && msg.iv && msg.content && typeof msg.content === 'string') {
                     // Skip if content is already an error message
@@ -112,17 +129,26 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                     }
                     
                     // Check if content looks like base64 (encrypted data)
-                    if (!/^[A-Za-z0-9+/=]+$/.test(msg.content)) {
-                        return msg; // Not base64, probably already decrypted or invalid
+                    if (!looksLikeCiphertext(msg.content)) {
+                        return {
+                            ...msg,
+                            encrypted: false,
+                            iv: undefined,
+                            sender_encryption_public_key: undefined
+                        };
                     }
                     
                     try {
                         const myKeys = await loadStoredKeys(user.username);
                         if (myKeys) {
-                            let senderEncryptionPublicKey = msg.sender_encryption_public_key;
+                            const senderKey = normalizeUsername(msg.from || '');
+                            const recipientKey = normalizeUsername(msg.to || '');
+                            const isSentByCurrentUser = senderKey === currentUserKey;
+                            const keyLookupUsername = isSentByCurrentUser ? recipientKey : senderKey;
+                            let peerEncryptionPublicKey = isSentByCurrentUser ? '' : msg.sender_encryption_public_key;
                             
                             // If no public key in message, try to request it
-                            if (!senderEncryptionPublicKey && socket) {
+                            if (!peerEncryptionPublicKey && socket && keyLookupUsername) {
                                 // Use inline request instead of useCallback to avoid dependency issues
                                 const senderKeys = await new Promise<any>((resolve) => {
                                     let settled = false;
@@ -135,8 +161,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
                                     const onKeys = (data: any) => {
                                         const responseUsername = normalizeUsername(data?.username || '');
-                                        const senderUsername = normalizeUsername(msg.from || '');
-                                        if (!responseUsername || !senderUsername || responseUsername !== senderUsername) {
+                                        if (!responseUsername || responseUsername !== keyLookupUsername) {
                                             return;
                                         }
                                         settled = true;
@@ -151,16 +176,16 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                                     }, 3000);
 
                                     socket.on('user_public_keys_response', onKeys);
-                                    socket.emit('get_user_public_keys', { username: msg.from });
+                                    socket.emit('get_user_public_keys', { username: keyLookupUsername });
                                 });
-                                senderEncryptionPublicKey = senderKeys?.publicKeys?.encryptionPublicKey;
+                                peerEncryptionPublicKey = senderKeys?.publicKeys?.encryptionPublicKey;
                             }
                             
-                            if (senderEncryptionPublicKey) {
+                            if (peerEncryptionPublicKey) {
                                 const decrypted = await decryptMessage(
                                     msg.content,
                                     msg.iv,
-                                    senderEncryptionPublicKey,
+                                    peerEncryptionPublicKey,
                                     myKeys.encryption.privateKey
                                 );
                                 console.log('[Chat History] Successfully decrypted old message');
@@ -173,9 +198,24 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                                     sender_encryption_public_key: undefined
                                 };
                             }
+
+                            return {
+                                ...msg,
+                                content: '[Encrypted message - key unavailable]',
+                                encrypted: false,
+                                iv: undefined,
+                                sender_encryption_public_key: undefined
+                            };
                         }
                     } catch (err) {
                         console.warn('[Chat History Decryption] Failed to decrypt message:', err);
+                        return {
+                            ...msg,
+                            content: '[Encrypted message - decryption failed]',
+                            encrypted: false,
+                            iv: undefined,
+                            sender_encryption_public_key: undefined
+                        };
                     }
                 }
                 return msg;
@@ -277,6 +317,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     useEffect(() => {
         const newSocket = io(SERVER_URL, {
             autoConnect: false,
+            withCredentials: true,
+            transports: ['websocket', 'polling'],
         });
 
         setSocket(newSocket);
@@ -311,7 +353,12 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             const normalized = (data || []).filter((item) => {
                 const contact = item.contact?.trim().toLowerCase();
                 return Boolean(contact) && contact !== currentUser;
-            });
+            }).map((item) => ({
+                ...item,
+                last_message_preview: looksLikeCiphertext(item.last_message_preview)
+                    ? '[Encrypted message]'
+                    : item.last_message_preview
+            }));
             setInbox(normalized);
         });
 
@@ -430,6 +477,9 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 }
             } else {
                 console.log('[Decryption] Message is not encrypted or missing IV.');
+                if (looksLikeCiphertext(mapped.content)) {
+                    mapped.content = '[Encrypted message - metadata missing]';
+                }
             }
 
             // 1. Save locally
@@ -451,7 +501,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         return () => {
             socket.off('direct_message', onDirectMessage);
         };
-    }, [socket, user, requestUserPublicKeys, loadInbox]);
+    }, [socket, user, requestUserPublicKeys, loadInbox, syncOwnKeysWithServer]);
 
     const login = useCallback((username: string, password: string) => {
         return new Promise<void>((resolve, reject) => {

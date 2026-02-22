@@ -67,6 +67,22 @@ interface FragmentRateWindow {
     count: number;
 }
 
+type MessageStorageMode = 'unknown' | 'extended' | 'legacy';
+
+interface LegacyEncryptedEnvelope {
+    v: 1;
+    cipher: string;
+    iv: string;
+    sender_key?: string;
+}
+
+interface DecodedStoredMessageContent {
+    content: string;
+    encrypted?: boolean;
+    iv?: string;
+    sender_encryption_public_key?: string;
+}
+
 // Map to track connected users: normalized username -> socketId.
 const userSockets = new Map<string, string>();
 
@@ -82,11 +98,89 @@ const fragmentBuffer = new Map<string, FragmentState>();
 // Per-socket fragment rate limiter.
 const fragmentRateWindows = new Map<string, FragmentRateWindow>();
 let isFragmentCleanupStarted = false;
+let messageStorageMode: MessageStorageMode = 'unknown';
 
 const normalizeUsername = (value: string): string => value.trim().toLowerCase();
 const checksumRegex = /^[a-f0-9]{64}$/i;
+const LEGACY_ENVELOPE_PREFIX = '__MSEZ_E2EE_V1__:';
 
 const sha256Hex = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
+
+const isMissingMessageColumnError = (errorMessage: string): boolean => (
+    /column|schema cache|does not exist|Could not find the 'iv' column|Could not find the 'is_encrypted' column/i.test(errorMessage)
+);
+
+const encodeLegacyEncryptedContent = (message: DirectMessage): string => {
+    if (!message.encrypted || typeof message.iv !== 'string' || message.iv.trim().length === 0) {
+        return message.content;
+    }
+
+    const envelope: LegacyEncryptedEnvelope = {
+        v: 1,
+        cipher: message.content,
+        iv: message.iv
+    };
+
+    if (typeof message.sender_encryption_public_key === 'string' && message.sender_encryption_public_key.trim().length > 0) {
+        envelope.sender_key = message.sender_encryption_public_key;
+    }
+
+    return `${LEGACY_ENVELOPE_PREFIX}${JSON.stringify(envelope)}`;
+};
+
+const decodeLegacyEncryptedContent = (content: unknown): DecodedStoredMessageContent | null => {
+    if (typeof content !== 'string' || !content.startsWith(LEGACY_ENVELOPE_PREFIX)) {
+        return null;
+    }
+
+    const rawPayload = content.slice(LEGACY_ENVELOPE_PREFIX.length);
+    try {
+        const parsed = JSON.parse(rawPayload) as Partial<LegacyEncryptedEnvelope>;
+        if (
+            parsed?.v !== 1
+            || typeof parsed.cipher !== 'string'
+            || parsed.cipher.trim().length === 0
+            || typeof parsed.iv !== 'string'
+            || parsed.iv.trim().length === 0
+        ) {
+            return null;
+        }
+
+        const decoded: DecodedStoredMessageContent = {
+            content: parsed.cipher,
+            encrypted: true,
+            iv: parsed.iv
+        };
+        if (typeof parsed.sender_key === 'string' && parsed.sender_key.trim().length > 0) {
+            decoded.sender_encryption_public_key = parsed.sender_key;
+        }
+        return decoded;
+    } catch {
+        return null;
+    }
+};
+
+const decodeStoredMessageContent = (row: any): DecodedStoredMessageContent => {
+    const storedContent = typeof row?.content === 'string' ? row.content : String(row?.content || '');
+    const decodedLegacy = decodeLegacyEncryptedContent(storedContent);
+    if (decodedLegacy) {
+        return decodedLegacy;
+    }
+
+    const iv = typeof row?.iv === 'string' && row.iv.trim().length > 0 ? row.iv : undefined;
+    const encrypted = typeof row?.is_encrypted === 'boolean' ? row.is_encrypted : undefined;
+    const senderEncryptionPublicKey =
+        typeof row?.sender_encryption_public_key === 'string' && row.sender_encryption_public_key.trim().length > 0
+            ? row.sender_encryption_public_key
+            : undefined;
+
+    return {
+        content: storedContent,
+        encrypted,
+        iv,
+        sender_encryption_public_key: senderEncryptionPublicKey
+    };
+};
 
 const cleanupExpiredFragments = (): void => {
     const now = Date.now();
@@ -253,11 +347,12 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
     }
 
     try {
+        const baseContent = encodeLegacyEncryptedContent(outboundMessage);
         const baseInsertPayload = {
             id: outboundMessage.id,
             sender_username: authUsername,
             recipient_username: recipientUsername,
-            content: outboundMessage.content,
+            content: baseContent,
             status: outboundMessage.status ?? 'sent',
             timestamp: outboundMessage.timestamp
         };
@@ -268,16 +363,24 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
             is_encrypted: outboundMessage.encrypted || false
         };
 
-        const { error: extendedInsertError } = await supabase
-            .from('messages')
-            .insert([extendedInsertPayload as any]);
+        if (messageStorageMode !== 'legacy') {
+            const { error: extendedInsertError } = await supabase
+                .from('messages')
+                .insert([extendedInsertPayload as any]);
 
-        if (extendedInsertError) {
-            const missingColumnError = /column|schema cache|Could not find the 'iv' column|Could not find the 'is_encrypted' column/i.test(extendedInsertError.message || '');
-            if (!missingColumnError) {
-                throw extendedInsertError;
+            if (!extendedInsertError) {
+                messageStorageMode = 'extended';
+            } else {
+                const missingColumnError = isMissingMessageColumnError(extendedInsertError.message || '');
+                if (!missingColumnError) {
+                    throw extendedInsertError;
+                }
+                messageStorageMode = 'legacy';
+                console.warn('[Persistence] messages table missing encryption metadata columns, using legacy content envelope mode.');
             }
+        }
 
+        if (messageStorageMode === 'legacy') {
             const { error: baseInsertError } = await supabase
                 .from('messages')
                 .insert([baseInsertPayload]);
@@ -358,16 +461,26 @@ const socketHandler = (io: any) => {
                 if (data && data.length > 0) {
                     console.log(`[Sync] Sending ${data.length} pending messages to ${username}`);
                     data.forEach((m: any) => {
+                        const decoded = decodeStoredMessageContent(m);
                         const outboundMessage: DirectMessage = {
                             id: m.id,
                             from: m.sender_username,
                             to: m.recipient_username,
-                            content: m.content,
+                            content: decoded.content,
                             timestamp: m.timestamp,
-                            status: 'delivered',
-                            iv: m.iv,
-                            encrypted: m.is_encrypted
+                            status: 'delivered'
                         };
+
+                        if (typeof decoded.iv === 'string') {
+                            outboundMessage.iv = decoded.iv;
+                        }
+                        if (typeof decoded.encrypted === 'boolean') {
+                            outboundMessage.encrypted = decoded.encrypted;
+                        }
+                        if (typeof decoded.sender_encryption_public_key === 'string') {
+                            outboundMessage.sender_encryption_public_key = decoded.sender_encryption_public_key;
+                        }
+
                         socket.emit('direct_message', outboundMessage);
                     });
                 }
@@ -737,14 +850,20 @@ const socketHandler = (io: any) => {
                     throw error;
                 }
 
-                const messages = (data || []).map((m: any) => ({
-                    id: m.id,
-                    from: m.sender_username,
-                    to: m.recipient_username,
-                    content: m.content,
-                    timestamp: m.timestamp,
-                    status: m.status ?? 'read'
-                }));
+                const messages = (data || []).map((m: any) => {
+                    const decoded = decodeStoredMessageContent(m);
+                    return {
+                        id: m.id,
+                        from: m.sender_username,
+                        to: m.recipient_username,
+                        content: decoded.content,
+                        timestamp: m.timestamp,
+                        status: m.status ?? 'read',
+                        encrypted: decoded.encrypted,
+                        iv: decoded.iv,
+                        sender_encryption_public_key: decoded.sender_encryption_public_key
+                    };
+                });
 
                 socket.emit('chat_history', { contact: targetUser, messages });
             } catch (err: any) {
@@ -793,9 +912,13 @@ const socketHandler = (io: any) => {
                     }
 
                     if (!inboxByContact.has(contact)) {
+                        const decoded = decodeStoredMessageContent(msg);
+                        const previewSource = decoded.encrypted
+                            ? '[Encrypted message]'
+                            : String(decoded.content || '');
                         inboxByContact.set(contact, {
                             contact,
-                            last_message_preview: String(msg.content || '').slice(0, 120),
+                            last_message_preview: previewSource.slice(0, 120),
                             last_timestamp: msg.timestamp,
                             unread_count: 0
                         });
