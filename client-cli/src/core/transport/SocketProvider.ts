@@ -21,10 +21,6 @@ class SocketProvider {
         this.socket.on("connect", () => {
             // Connection logic handled in main index
         });
-
-        this.socket.on("connect_error", (err: Error) => {
-            console.error("Connection error:", err.message);
-        });
     }
 
     setAuth(token: string | null) {
@@ -50,17 +46,20 @@ class SocketProvider {
 
     onMessage(callback: (data: any) => void) {
         if (this.socket) {
-            // Clear existing listeners to avoid duplicate handlers across chat sessions.
-            this.socket.off("direct_message");
-            this.socket.off("message");
-
             const handler = (data: any) => {
                 callback(data);
             };
 
             this.socket.on("direct_message", handler);
             this.socket.on("message", handler);
+
+            // Return a cleanup function
+            return () => {
+                this.socket!.off("direct_message", handler);
+                this.socket!.off("message", handler);
+            };
         }
+        return () => { };
     }
 
     disconnect() {

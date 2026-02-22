@@ -41,6 +41,10 @@
             "type": "string",
             "description": "Initialization vector for encryption (base64)"
         },
+        "sender_encryption_public_key": {
+            "type": "string",
+            "description": "Sender public X25519 key (base64) used by recipient to derive shared secret"
+        },
         "content_type": {
             "type": "string",
             "enum": [

@@ -39,6 +39,7 @@ interface DirectMessage {
     status?: 'sent' | 'delivered' | 'read';
     encrypted?: boolean;
     iv?: string;
+    sender_encryption_public_key?: string;
     content_type?: 'text' | 'image' | 'file';
     transport?: 'internet' | 'bluetooth';
 }
@@ -169,6 +170,7 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
     }
 
     const message = rawData as Partial<DirectMessage> & { sender?: string };
+    console.log('[Process] Processing message. IV:', message.iv, 'Encrypted:', message.encrypted);
 
     // Allow sender alias while preserving AJV contract (`from`) for validation.
     if (typeof message.from !== 'string' && typeof message.sender === 'string') {
@@ -240,6 +242,9 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
     if (typeof message.iv === 'string') {
         outboundMessage.iv = message.iv;
     }
+    if (typeof message.sender_encryption_public_key === 'string' && message.sender_encryption_public_key.trim().length > 0) {
+        outboundMessage.sender_encryption_public_key = message.sender_encryption_public_key;
+    }
     if (message.content_type) {
         outboundMessage.content_type = message.content_type;
     }
@@ -248,19 +253,38 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
     }
 
     try {
-        const { error: dbError } = await supabase
-            .from('messages')
-            .insert([{
-                id: outboundMessage.id,
-                sender_username: authUsername,
-                recipient_username: recipientUsername,
-                content: outboundMessage.content,
-                status: outboundMessage.status ?? 'sent',
-                timestamp: outboundMessage.timestamp
-            }]);
+        const baseInsertPayload = {
+            id: outboundMessage.id,
+            sender_username: authUsername,
+            recipient_username: recipientUsername,
+            content: outboundMessage.content,
+            status: outboundMessage.status ?? 'sent',
+            timestamp: outboundMessage.timestamp
+        };
 
-        if (dbError) {
-            throw dbError;
+        const extendedInsertPayload = {
+            ...baseInsertPayload,
+            iv: outboundMessage.iv || null,
+            is_encrypted: outboundMessage.encrypted || false
+        };
+
+        const { error: extendedInsertError } = await supabase
+            .from('messages')
+            .insert([extendedInsertPayload as any]);
+
+        if (extendedInsertError) {
+            const missingColumnError = /column|schema cache|Could not find the 'iv' column|Could not find the 'is_encrypted' column/i.test(extendedInsertError.message || '');
+            if (!missingColumnError) {
+                throw extendedInsertError;
+            }
+
+            const { error: baseInsertError } = await supabase
+                .from('messages')
+                .insert([baseInsertPayload]);
+
+            if (baseInsertError) {
+                throw baseInsertError;
+            }
         }
     } catch (err: any) {
         console.error('Failed to save message:', err?.message || err);
@@ -269,9 +293,14 @@ const processDirectMessage = async (io: any, socket: any, rawData: unknown): Pro
     }
 
     const recipientSocketId = userSockets.get(recipientUsername);
+    console.log(`[Message] Routing to ${recipientUsername} (Socket ID: ${recipientSocketId || 'OFFLINE'})`);
+    console.log('[Message] Outbound payload IV:', outboundMessage.iv);
+
     if (recipientSocketId) {
         io.to(recipientSocketId).emit('direct_message', outboundMessage);
+        console.log(`[Message] Sent to socket ${recipientSocketId}`);
     } else {
+        console.log(`[Message] User ${recipientUsername} is offline. Message saved to DB.`);
         socket.emit('notification', `User ${recipientRaw} is offline. Message saved.`);
         socket.emit('user_status', { username: recipientRaw, status: 'offline' });
     }
@@ -301,12 +330,58 @@ const socketHandler = (io: any) => {
     }
 
     io.on('connection', (socket: any) => {
-        console.log(`User connected: ${socket.id}`);
+        console.log(`[Connection] User connected: ${socket.id}`);
+        if (socket.user) {
+            console.log(`[Connection] User authenticated as: ${socket.user.username}`);
+        } else {
+            console.log(`[Connection] User unauthenticated`);
+        }
+
+        /**
+         * Sync pending messages that were stored while user was offline.
+         * Part of the 'Relay & Purge' model: server retrieves stored messages,
+         * pushes them to the client, and waits for ACKs to delete them.
+         */
+        const syncPendingMessages = async () => {
+            if (!socket.user) return;
+            const username = normalizeUsername(socket.user.username);
+
+            try {
+                const { data, error } = await supabase
+                    .from('messages')
+                    .select('*')
+                    .eq('recipient_username', username)
+                    .order('timestamp', { ascending: true });
+
+                if (error) throw error;
+
+                if (data && data.length > 0) {
+                    console.log(`[Sync] Sending ${data.length} pending messages to ${username}`);
+                    data.forEach((m: any) => {
+                        const outboundMessage: DirectMessage = {
+                            id: m.id,
+                            from: m.sender_username,
+                            to: m.recipient_username,
+                            content: m.content,
+                            timestamp: m.timestamp,
+                            status: 'delivered',
+                            iv: m.iv,
+                            encrypted: m.is_encrypted
+                        };
+                        socket.emit('direct_message', outboundMessage);
+                    });
+                }
+            } catch (err: any) {
+                console.error(`[Sync Error] ${err.message}`);
+            }
+        };
 
         if (socket.user) {
             const username = normalizeUsername((socket.user as AuthUser).username);
             userSockets.set(username, socket.id);
+            console.log(`[Map Update] User ${username} mapped to ${socket.id}`);
             io.emit('user_status', { username: (socket.user as AuthUser).username, status: 'online' });
+            syncPendingMessages();
         }
 
         socket.on('register', async ({ id, username, password }: { id: string; username: string; password: string }) => {
@@ -349,6 +424,7 @@ const socketHandler = (io: any) => {
 
                 socket.emit('login_success', { token, username: user.username, userId: user.id });
                 io.emit('user_status', { username: user.username, status: 'online' });
+                syncPendingMessages();
             } catch (err: any) {
                 console.error(`[Login Error] ${err.message}`);
                 socket.emit('error', { message: 'Login failed' });
@@ -451,11 +527,20 @@ const socketHandler = (io: any) => {
 
                 const { data: userData, error: userError } = await supabase
                     .from('users')
-                    .select('id')
-                    .eq('username', payload.username)
-                    .single();
+                    .select('id, username')
+                    .ilike('username', requestedUsername)
+                    .limit(1);
 
-                if (userError || !userData) {
+                if (userError || !userData || userData.length === 0) {
+                    return socket.emit('user_public_keys_response', {
+                        username: payload.username,
+                        publicKeys: null,
+                        error: 'User not found'
+                    });
+                }
+
+                const matchedUser = userData[0];
+                if (!matchedUser) {
                     return socket.emit('user_public_keys_response', {
                         username: payload.username,
                         publicKeys: null,
@@ -466,7 +551,7 @@ const socketHandler = (io: any) => {
                 const { data: keysData, error: keysError } = await supabase
                     .from('publickeys')
                     .select('public_sign_key, public_encrypt_key, format')
-                    .eq('id', userData.id)
+                    .eq('id', matchedUser.id)
                     .single();
 
                 if (keysError || !keysData) {
@@ -508,19 +593,23 @@ const socketHandler = (io: any) => {
         });
 
         socket.on('fragment', async (fragment: unknown) => {
+            console.log('[Fragment] Received fragment:', JSON.stringify(fragment).substring(0, 100) + '...');
             cleanupExpiredFragments();
 
             if (!socket.user) {
+                console.error('[Fragment Error] Unauthorized user');
                 socket.emit('error', { message: 'Unauthorized' });
                 return;
             }
 
             if (!enforceFragmentRateLimit(socket.id)) {
+                console.error('[Fragment Error] Rate limit exceeded');
                 socket.emit('error', { message: 'Fragment rate limit exceeded' });
                 return;
             }
 
             if (!isValidFragment(fragment)) {
+                console.error('[Fragment Error] Invalid fragment format:', fragment);
                 socket.emit('error', { message: 'Invalid fragment format' });
                 return;
             }
@@ -588,6 +677,8 @@ const socketHandler = (io: any) => {
                 let parsedMessage: unknown;
                 try {
                     parsedMessage = JSON.parse(assembled);
+                    console.log('[Fragment] Reassembled message keys:', Object.keys(parsedMessage as object));
+                    console.log('[Fragment] Reassembled message IV:', (parsedMessage as any).iv);
                 } catch {
                     socket.emit('error', { message: 'Failed to parse reassembled message' });
                     return;
@@ -603,6 +694,27 @@ const socketHandler = (io: any) => {
             } finally {
                 // Always clear full-message buffer once processing is complete/failed.
                 fragmentBuffer.delete(msgId);
+            }
+        });
+
+        // Client acknowledges it has successfully received and saved the message locally.
+        socket.on('message_delivered_ack', async (payload: { msgId: string }) => {
+            if (!socket.user || !payload.msgId) return;
+            const username = normalizeUsername(socket.user.username);
+
+            try {
+                // Delete the message from the server once it's confirmed delivered to the recipient.
+                // This implements the 'Epistolary / Ephemeral' privacy model.
+                const { error } = await supabase
+                    .from('messages')
+                    .delete()
+                    .eq('id', payload.msgId)
+                    .eq('recipient_username', username);
+
+                if (error) throw error;
+                console.log(`[ACK] Message ${payload.msgId} delivered and purged from server.`);
+            } catch (err: any) {
+                console.error(`[ACK Error] ${err.message}`);
             }
         });
 

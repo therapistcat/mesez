@@ -24,6 +24,8 @@ Resilient messaging app focused on low-friction communication with Socket.io, au
 
 Fragmentation is implemented to support constrained transports (including future mesh/BLE paths) where smaller packets are more reliable than sending a full JSON payload in one frame.
 
+Full implementation details are documented in `FRAGMENTATION_README.md`.
+
 - Client side:
   - Direct message object is `JSON.stringify`-ed.
   - Payload is split into UTF-8-safe fragments of 20-31 bytes.
@@ -92,11 +94,25 @@ SUPABASE_ANON_KEY=sb_publishable_-3PaDcpKEuhQEv4SlqPfqQ_m61PZ3MD
 SERVER_URL=http://localhost:3000
 ```
 
-Note: web client server URL is currently hardcoded to `http://localhost:3000` in `client-web/src/context/SocketContext.tsx`.
+### Web Client (`client-web/.env.local`)
+
+Copy `client-web/.env.example` to `client-web/.env.local` and set:
+
+```env
+VITE_SERVER_URL=http://localhost:3000
+```
+
+If you expose the server through ngrok, set:
+
+```env
+VITE_SERVER_URL=https://<your-ngrok-server-url>
+```
 
 ## Setup
 
 ```bash
+cd mesez
+npm install
 cd server && npm install
 cd ../client-cli && npm install
 cd ../client-web && npm install
@@ -126,6 +142,32 @@ npm start
 cd client-web
 npm run dev
 ```
+
+### Run server + web together (single command)
+
+From project root (`mesez/`):
+
+```bash
+npm run dev
+```
+
+### Run server + web + ngrok together
+
+From project root (`mesez/`):
+
+```bash
+npm run dev:with-ngrok
+```
+
+Prerequisite: install ngrok and run `ngrok config add-authtoken <your-token>` once.
+
+This will start:
+
+- server on `http://localhost:3000`
+- web client on Vite dev server (default `http://localhost:5173`)
+- ngrok tunnel for server (`http://localhost:3000`)
+
+Then copy the HTTPS forwarding URL shown by ngrok and place it in `client-web/.env.local` as `VITE_SERVER_URL`, then restart the web client once.
 
 ## Notes
 
