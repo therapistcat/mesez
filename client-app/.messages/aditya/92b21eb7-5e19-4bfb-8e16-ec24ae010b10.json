@@ -1,0 +1,11 @@
+{
+  "id": "92b21eb7-5e19-4bfb-8e16-ec24ae010b10",
+  "from": "aditya",
+  "to": "sahil",
+  "content": "hello",
+  "timestamp": "2026-03-12T20:21:03.856Z",
+  "status": "sent",
+  "encrypted": true,
+  "iv": "+NcFz6x+iDTNud3x",
+  "sender_encryption_public_key": "MCowBQYDK2VuAyEA+VGAIqCnNa7kotUMIub5lKtg/lKDwpKRUrrCOYnxik0="
+}

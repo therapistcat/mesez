@@ -3,7 +3,7 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import socketHandler from './sockets/socketHandler.js';
-
+import supabase from './config/supabase';
 dotenv.config();
 
 const app = express();
@@ -66,11 +66,12 @@ server.listen(PORT, () => {
     // Check Supabase connection
     void (async () => {
         try {
-            const { default: supabase } = await import('./config/supabase.js');
+            //const { default: supabase } = await import('./config/supabase.ts');
+            //console.log(supabase);
             const { error } = await supabase.from('users').select('count', { count: 'exact', head: true });
 
             if (error) {
-                console.error('Supabase connection failed:', error.message);
+                console.error('Supabase connection failed:', error);
             } else {
                 console.log('Connected to Supabase');
             }

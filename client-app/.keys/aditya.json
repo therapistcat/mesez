@@ -1,0 +1,13 @@
+{
+  "username": "aditya",
+  "createdAt": "2026-03-12T20:00:47.559Z",
+  "format": "spki-pkcs8-base64",
+  "signing": {
+    "publicKey": "MCowBQYDK2VwAyEA7aiauLgt8f19TV9HE/fQBIvue9tH6OkeWgtI1kpCwdo=",
+    "privateKey": "MC4CAQAwBQYDK2VwBCIEIPOl1rvRyBshGjA8DD+8mR+KJpy7bV8GLu7NnfxDskkc"
+  },
+  "encryption": {
+    "publicKey": "MCowBQYDK2VuAyEA+VGAIqCnNa7kotUMIub5lKtg/lKDwpKRUrrCOYnxik0=",
+    "privateKey": "MC4CAQAwBQYDK2VuBCIEIMfZkLzuq9vkaPe18TrOHH2FkNVnhP+zzmigOXZZV3Cz"
+  }
+}

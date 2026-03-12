@@ -1,0 +1,13 @@
+{
+  "username": "aditya",
+  "createdAt": "2026-02-13T15:36:31.175Z",
+  "format": "der-base64",
+  "signing": {
+    "publicKey": "MCowBQYDK2VwAyEAgsxSnwxsk2XPm6Xv44zf0RNArZcAgmdDmAOxtzwyRIc=",
+    "privateKey": "MC4CAQAwBQYDK2VwBCIEILWyTaaGQBDAQTSm2b6mr44ZBDYAuNYedkoTvuSjAvHw"
+  },
+  "encryption": {
+    "publicKey": "MCowBQYDK2VuAyEAYtM6+fid5V7Eaop3sRM8PlgFmd2Ixc6IteIchA8ucSs=",
+    "privateKey": "MC4CAQAwBQYDK2VuBCIEIBDJflrpxA1e7OzurUmX0f0G0/RYxVsf7IGQ3HjT1BJV"
+  }
+}

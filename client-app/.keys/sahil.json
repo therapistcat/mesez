@@ -1,0 +1,13 @@
+{
+  "username": "sahil",
+  "createdAt": "2026-03-12T20:07:42.644Z",
+  "format": "spki-pkcs8-base64",
+  "signing": {
+    "publicKey": "MCowBQYDK2VwAyEAbCnSuMWZp2fFXCfvITBTJQFCGRdD4GK46JUmT7M6dvI=",
+    "privateKey": "MC4CAQAwBQYDK2VwBCIEIO5U8azdhtr3eWwRY8pVCRBYHg1Yv94SW0BomO3lxIea"
+  },
+  "encryption": {
+    "publicKey": "MCowBQYDK2VuAyEA5bnYjsi5oK8A0ts8q37bPybTUd+7ofmhbuyZEiMu7XM=",
+    "privateKey": "MC4CAQAwBQYDK2VuBCIEIH9rS8AuWh9yhwEy8eybRIEhCq6QfzvK12IvOoii+ZGA"
+  }
+}
